@@ -40,7 +40,6 @@ def main():
                     break
 
                 parsed = parse_ndjson_line(line)
-                print(parsed)
                 if parsed is None:
                     tail = line[-120:] if len(line) > 120 else line
                     print(f"Bad JSON line (or incomplete). Tail: {tail!r}")
@@ -69,6 +68,27 @@ def main():
                     print(f"    OT={mon.ot_name} Nick={mon.nickname} Lang={mon.language} Markings={mon.markings}")
                     print(f"    Exp={g.exp} Friendship={g.friendship} Pokerus=0x{m.pokerus:02X}")
                     print(f"    EVs: {mon.data.evs}")
+                    print(f"    IVs: {m.ivs}")
+                    print(f"    Origins: ball={m.origins.ball_id} game={m.origins.game_id} lvl_met={m.origins.level_met} hatched={m.origins.hatched}")
+                    print(f"    Moves: " + ", ".join([f"{mv.move_id}(pp{mv.pp})" for mv in a.moves if mv.move_id != 0]))
+                    print(f"    RibbonsBits=0x{m.ribbons_obedience:08X}")
+                
+                print("===================================================")
+                print(" Opponent Party:")
+
+                for opp_mon in parsed.opponent_party:
+                    if not opp_mon.is_present:
+                        print(f"  Opponent Slot {opp_mon.slot}: (empty)")
+                        continue
+
+                    g = opp_mon.data.growth
+                    a = opp_mon.data.attacks
+                    m = opp_mon.data.misc
+
+                    print(" ", opp_mon.summary(move_db))
+                    print(f"    OT={opp_mon.ot_name} Nick={opp_mon.nickname} Lang={opp_mon.language} Markings={opp_mon.markings}")
+                    print(f"    Exp={g.exp} Friendship={g.friendship} Pokerus=0x{m.pokerus:02X}")
+                    print(f"    EVs: {opp_mon.data.evs}")
                     print(f"    IVs: {m.ivs}")
                     print(f"    Origins: ball={m.origins.ball_id} game={m.origins.game_id} lvl_met={m.origins.level_met} hatched={m.origins.hatched}")
                     print(f"    Moves: " + ", ".join([f"{mv.move_id}(pp{mv.pp})" for mv in a.moves if mv.move_id != 0]))

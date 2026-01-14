@@ -13,6 +13,7 @@ class ParsedFrame:
     raw: Dict[str, Any]
     state: GameState
     party: List[PartyMon]
+    opponent_party: List[PartyMon]
 
 
 def parse_ndjson_line(line: str) -> Optional[ParsedFrame]:
@@ -37,14 +38,28 @@ def parse_ndjson_line(line: str) -> Optional[ParsedFrame]:
     if not isinstance(party_hex, str):
         party_hex = ""
 
+    opponent_party_hex = msg.get("opponent_party_hex") or ""
+    if not isinstance(opponent_party_hex, str):
+        opponent_party_hex = ""
+
     # Party can be missing in some debug modes; handle gracefully
     try:
         party_bytes = bytes.fromhex(party_hex) if party_hex else b""
     except ValueError:
         party_bytes = b""
 
+    # Opponent party can be missing in some debug modes; handle gracefully
+    try:
+        opponent_party_bytes = bytes.fromhex(opponent_party_hex) if opponent_party_hex else b""
+    except ValueError:
+        opponent_party_bytes = b""
+
     party: List[PartyMon] = []
     if len(party_bytes) == 600:
         party = parse_party_bytes(party_bytes)
 
-    return ParsedFrame(raw=msg, state=state, party=party)
+    opponent_party: List[PartyMon] = []
+    if len(opponent_party_bytes) == 600:
+        opponent_party = parse_party_bytes(opponent_party_bytes)
+
+    return ParsedFrame(raw=msg, state=state, party=party, opponent_party=opponent_party)

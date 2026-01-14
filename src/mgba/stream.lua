@@ -28,6 +28,11 @@ local PORT = 7777
 local PARTY_BASE_PRIMARY = 0x020244EC
 local PARTY_LEN = 600 -- 6 mons * 100 bytes
 
+-- =========================
+-- Opponent party block
+-- =========================
+local OPPONENT_PARTY_BASE_PRIMARY = 0x02024744
+
 -- Stream rate: every N frames (GBA ~60fps, so 6 => ~10Hz)
 local SEND_EVERY_N_FRAMES = 60
 
@@ -364,6 +369,9 @@ callbacks:add("frame", function()
   local party_bytes = emu:readRange(PARTY_BASE_PRIMARY, PARTY_LEN)
   local party_hex = to_hex(party_bytes)
 
+  local opponent_party_bytes = emu:readRange(OPPONENT_PARTY_BASE_PRIMARY, PARTY_LEN)
+  local opponent_party_hex = to_hex(opponent_party_bytes)
+
   -- Callbacks (from gMain if possible)
   local gMainBase, cb1, cb2 = read_callbacks()
 
@@ -385,6 +393,7 @@ callbacks:add("frame", function()
   local json_line = string.format(
     '{"frame":%d,' ..
       '"party_base":%d,"party_hex":"%s",' ..
+      '"opponent_party_base":%d,"opponent_party_hex":"%s",' ..
       '"sig":{' ..
         '"battleTypeFlags":%s,' ..
         '"gMainBase":%s,' ..
@@ -412,7 +421,7 @@ callbacks:add("frame", function()
     '}\n',
     f,
     PARTY_BASE_PRIMARY, party_hex,
-
+    OPPONENT_PARTY_BASE_PRIMARY, opponent_party_hex,
     json_num(sig.battleTypeFlags),
     json_num(gMainBase),
     json_num(sig.cb1),
