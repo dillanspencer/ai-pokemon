@@ -63,3 +63,14 @@ def parse_ndjson_line(line: str) -> Optional[ParsedFrame]:
         opponent_party = parse_party_bytes(opponent_party_bytes)
 
     return ParsedFrame(raw=msg, state=state, party=party, opponent_party=opponent_party)
+
+
+def read_screenshot_b64(path: str) -> str | None:
+    try:
+        data = Path(path).read_bytes()
+        return base64.b64encode(data).decode("ascii")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        # if you ever race the write, just skip this frame
+        return None

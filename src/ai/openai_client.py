@@ -27,19 +27,36 @@ class OpenAIBrain:
         Returns a dict decision (you can validate it with pydantic/dataclasses).
         Uses JSON-only output so parsing stays robust.
         """
-        instructions = (
-            "You are playing Pokémon Emerald. "
-            "Return ONLY valid JSON with keys: "
-            "{button: string, reason: string, confidence: number}.\n"
-            "button must be one of: A,B,START,SELECT,UP,DOWN,LEFT,RIGHT,L,R,NONE."
-        )
 
         # Responses API: create response from input text/messages. :contentReference[oaicite:1]{index=1}
         resp = self.client.responses.create(
-            model=self.cfg.model,
-            instructions=instructions,
-            input=state_summary,
-            temperature=self.cfg.temperature,
+            prompt={
+                "id": "pmpt_696951ae22848197b60602b18f7691ed0610c009176ab218",
+                "version": "1"
+            },
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "{\n{\nlast_move: A\n}\n}" # memory buffer
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,..."
+                        }
+                    ]
+                },
+            ],
+            reasoning={
+                "summary": "auto"
+            },
+            store=True,
+            include=[
+                "reasoning.encrypted_content",
+                "web_search_call.action.sources"
+            ]
         )
 
         # The SDK exposes aggregated text via output_text in docs. :contentReference[oaicite:2]{index=2}

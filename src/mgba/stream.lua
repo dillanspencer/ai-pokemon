@@ -34,7 +34,7 @@ local PARTY_LEN = 600 -- 6 mons * 100 bytes
 local OPPONENT_PARTY_BASE_PRIMARY = 0x02024744
 
 -- Stream rate: every N frames (GBA ~60fps, so 6 => ~10Hz)
-local SEND_EVERY_N_FRAMES = 60
+local SEND_EVERY_N_FRAMES = 600
 
 -- =========================
 -- Addresses (optional)
@@ -63,6 +63,9 @@ local ADDR = {
   -- Optional / later:
   gPlayerAvatar_flags      = 0x00000000, -- u8/u16 (depends on what you choose)
 }
+
+local SCREENSHOT_PATH = "mgba_latest.png"     -- relative = usually ROM folder / working dir
+local SCREENSHOT_TMP  = "mgba_latest.tmp.png" -- temp file for atomic replace
 
 -- =========================
 -- Helpers: socket send (prevents truncated JSON)
@@ -388,6 +391,11 @@ callbacks:add("frame", function()
 
   -- Derived flags + mode
   local flags, mode = derive_flags(sig)
+
+    -- Screenshot (fast + stable). Prefer screenshotToImage if available.
+  local okShot = false
+  emu:screenshot("test")
+  okShot = true
 
   -- NDJSON line
   local json_line = string.format(

@@ -7,10 +7,12 @@ from .models.pokemon import load_move_db
 from .receiver import stream_parsed_frames
 from .ai.openai_client import AIConfig, OpenAIBrain
 from .ai.policy import CallPolicy
+from .helpers.receiver_parser import read_screenshot_b64
 
 HOST = "127.0.0.1"
 PORT = 7777
 
+IMAGE_PATH = "Pokemon - Emerald Version (USA, Europe)-0.png"
 
 def build_signature(parsed: Any) -> str:
     """
@@ -69,6 +71,43 @@ def build_state_summary(parsed: Any, move_db: Dict[int, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_state_object(parsed: Any, move_db: Dict[int, Any]) -> Dict[str, Any]:
+    """
+    Convert rich parsed frame -> compact, AI-friendly dict.
+    Keep it short; include only what matters for decisions.
+    """
+    st = parsed.state
+
+    obj: Dict[str, Any] = {}
+
+    obj["party"] = []
+    for mon in parsed.party:
+        if not mon.is_present:
+            obj["party"].append({"slot": mon.slot, "present": False})
+            continue
+        obj["party"].append({
+            "slot": mon.slot,
+            "present": True,
+            "summary": mon.summary(move_db),
+        })
+
+    # Optional opponent party when in battle
+    if getattr(parsed, "opponent_party", None) is not None:
+        obj["opponent_party"] = []
+        for mon in parsed.opponent_party:
+            if not mon.is_present:
+                obj["opponent_party"].append({"slot": mon.slot, "present": False})
+                continue
+            obj["opponent_party"].append({
+                "slot": mon.slot,
+                "present": True,
+                "summary": mon.summary(move_db),
+            })
+
+    return obj
+
+
+
 def main():
     move_db = load_move_db("src/models/moves.json")
 
@@ -84,6 +123,8 @@ def main():
         summary = build_state_summary(parsed, move_db)
         print("\n=== State Summary ===")
         print(summary)
+
+        state = build_state_object(parsed, move_db)
         # decision = brain.decide_next_input(state_summary=summary)
 
         # # For now, just print.
