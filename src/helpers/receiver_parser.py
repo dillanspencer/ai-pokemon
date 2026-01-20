@@ -6,12 +6,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..models.game_state import GameState
 from ..models.pokemon import PartyMon, parse_party_bytes
+from ..models.player import Player
+
+import base64
+import os
+from pathlib import Path
 
 
 @dataclass(frozen=True, slots=True)
 class ParsedFrame:
     raw: Dict[str, Any]
     state: GameState
+    player: Player
     party: List[PartyMon]
     opponent_party: List[PartyMon]
 
@@ -33,6 +39,8 @@ def parse_ndjson_line(line: str) -> Optional[ParsedFrame]:
         return None
 
     state = GameState.from_msg(msg)
+
+    player = Player.from_msg(msg)
 
     party_hex = msg.get("party_hex") or ""
     if not isinstance(party_hex, str):
@@ -62,15 +70,45 @@ def parse_ndjson_line(line: str) -> Optional[ParsedFrame]:
     if len(opponent_party_bytes) == 600:
         opponent_party = parse_party_bytes(opponent_party_bytes)
 
-    return ParsedFrame(raw=msg, state=state, party=party, opponent_party=opponent_party)
+    return ParsedFrame(raw=msg, state=state, party=party, opponent_party=opponent_party, player=player)
 
 
-def read_screenshot_b64(path: str) -> str | None:
+def read_screenshot_b64_and_delete(path: str | os.PathLike) -> str | None:
+    """
+    Read PNG/JPG file, return base64 string (no data: prefix), then delete the file.
+    Returns None if file doesn't exist yet (or cannot be read).
+    """
+    p = Path(path)
+
+    if not p.exists():
+        return None
+
     try:
-        data = Path(path).read_bytes()
-        return base64.b64encode(data).decode("ascii")
-    except FileNotFoundError:
-        return None
+        data = p.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        return f'data:image/jpeg;base64,{b64}'
     except OSError:
-        # if you ever race the write, just skip this frame
         return None
+    finally:
+        # Best-effort cleanup
+        try:
+            p.unlink(missing_ok=True)  # py>=3.8 supports missing_ok
+        except Exception:
+            pass
+
+
+def delete_all_screenshots(image_path: str) -> None:
+    """
+    Deletes all PNG screenshots in the same folder as image_path.
+    Used when we detect a missed or stale screenshot.
+    """
+    folder = Path(image_path).parent
+
+    if not folder.exists():
+        return
+
+    for p in folder.glob("*.png"):
+        try:
+            p.unlink()
+        except Exception as e:
+            print(f"[WARN] Failed to delete {p}: {e}")

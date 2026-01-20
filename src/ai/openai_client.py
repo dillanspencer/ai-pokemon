@@ -22,17 +22,18 @@ class OpenAIBrain:
         self.cfg = cfg
         self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-    def decide_next_input(self, *, state_summary: str) -> Dict[str, Any]:
+    def decide_next_input(self, *, state: str, img64: str) -> Dict[str, Any]:
         """
         Returns a dict decision (you can validate it with pydantic/dataclasses).
         Uses JSON-only output so parsing stays robust.
         """
 
+        state = json.dumps(state, indent=2)
+
         # Responses API: create response from input text/messages. :contentReference[oaicite:1]{index=1}
         resp = self.client.responses.create(
             prompt={
-                "id": "pmpt_696951ae22848197b60602b18f7691ed0610c009176ab218",
-                "version": "1"
+                "id": "pmpt_696951ae22848197b60602b18f7691ed0610c009176ab218", 
             },
             input=[
                 {
@@ -40,11 +41,11 @@ class OpenAIBrain:
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "{\n{\nlast_move: A\n}\n}" # memory buffer
+                            "text": state
                         },
                         {
                             "type": "input_image",
-                            "image_url": "data:image/jpeg;base64,..."
+                            "image_url":img64
                         }
                     ]
                 },

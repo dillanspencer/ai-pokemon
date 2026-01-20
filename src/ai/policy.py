@@ -7,7 +7,7 @@ from typing import Optional
 
 @dataclass
 class CallPolicy:
-    min_seconds_between_calls: float = 1 # seconds
+    min_seconds_between_calls: float = 10 # seconds
 
     _last_call_ts: float = 0.0
     _last_signature: Optional[str] = None

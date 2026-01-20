@@ -7,12 +7,17 @@ from .models.pokemon import load_move_db
 from .receiver import stream_parsed_frames
 from .ai.openai_client import AIConfig, OpenAIBrain
 from .ai.policy import CallPolicy
-from .helpers.receiver_parser import read_screenshot_b64
+from .helpers.receiver_parser import read_screenshot_b64_and_delete, delete_all_screenshots
+from .mgba.input_injector import MGBASocketInjector
+from .mgba.decision_adapter import decision_to_press
+
 
 HOST = "127.0.0.1"
 PORT = 7777
 
-IMAGE_PATH = "Pokemon - Emerald Version (USA, Europe)-0.png"
+IMAGE_PATH = "src/mgba/rom/Pokemon - Emerald Version (USA, Europe)-0.png"
+
+CONF_THRESHOLD = 0
 
 def build_signature(parsed: Any) -> str:
     """
@@ -40,6 +45,7 @@ def build_state_summary(parsed: Any, move_db: Dict[int, Any]) -> str:
     Keep it short; include only what matters for decisions.
     """
     st = parsed.state
+    player = parsed.player
 
     lines = []
     lines.append(f"Frame: {st.frame}")
@@ -49,6 +55,10 @@ def build_state_summary(parsed: Any, move_db: Dict[int, Any]) -> str:
         f"battleTypeFlags={st.signals.battle_type_flags} "
         f"script1={st.signals.script1_active} script2={st.signals.script2_active} "
         f"fade={st.signals.palette_fade_active}"
+    )
+    lines.append(
+        f"Player at map {player.map_group}-{player.map_num}, "
+        f"pos ({player.x},{player.y}), objEventId={player.object_event_id}"
     )
 
     lines.append("Your party:")
@@ -78,7 +88,17 @@ def build_state_object(parsed: Any, move_db: Dict[int, Any]) -> Dict[str, Any]:
     """
     st = parsed.state
 
+    player = parsed.player
+
     obj: Dict[str, Any] = {}
+
+    obj["player"] = {
+        "map_group": player.map_group,
+        "map_num": player.map_num,
+        "x": player.x,
+        "y": player.y,
+        "object_event_id": player.object_event_id,
+    }
 
     obj["party"] = []
     for mon in parsed.party:
@@ -114,23 +134,62 @@ def main():
     brain = OpenAIBrain(AIConfig(model="gpt-5.2", temperature=0.2))
     policy = CallPolicy()
 
+    injector = MGBASocketInjector(HOST, PORT + 1)
+    injector.start()
+
+    delete_all_screenshots(IMAGE_PATH)
+
+    memory = []
+    mem_idx = 0
+
     for parsed in stream_parsed_frames(HOST, PORT):
+        injector.accept_if_needed()
+
         sig = build_signature(parsed)
+        screenshot_b64 = read_screenshot_b64_and_delete(IMAGE_PATH)
+
+        if not screenshot_b64:
+            print("No screenshot found; skipping this frame.")
+            delete_all_screenshots(IMAGE_PATH)
+            continue
 
         if not policy.should_call(sig):
             continue
 
-        summary = build_state_summary(parsed, move_db)
-        print("\n=== State Summary ===")
-        print(summary)
+        # summary = build_state_summary(parsed, move_db)
+        # print("\n=== State Summary ===")
+        # print(summary)
+        # continue
 
-        state = build_state_object(parsed, move_db)
-        # decision = brain.decide_next_input(state_summary=summary)
+        state_obj = build_state_object(parsed, move_db)
+        state = {
+            "state": state_obj,
+            "memory": memory,
+        }
+        print("\n=== State Object ===")
+        print(state)
+        decision = brain.decide_next_input(state=state, img64=screenshot_b64)
+       
+        conf = float(decision.get("confidence", 0.0))
+
+        if conf >= CONF_THRESHOLD:
+            press = decision_to_press(decision)
+            injector.send_press(press)
+
+        mem = decision.get("memory_update")
+        if mem is not None and isinstance(mem, dict):
+            mem["confidence"] = conf
+            mem["index"] = mem_idx
+            mem_idx += 1
+        if isinstance(mem, dict):
+            memory.append(mem)
+            # limit to last 10 memories
+            memory = memory[-10:]
 
         # # For now, just print.
         # # Next step: route this to your "input injector" module.
-        # print("\n=== AI Decision ===")
-        # print(decision)
+        print("\n=== AI Decision ===")
+        print(decision)
 
 
 if __name__ == "__main__":

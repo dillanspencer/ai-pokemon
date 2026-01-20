@@ -1,26 +1,26 @@
--- mGBA Lua: stream Pokemon Emerald party + "state flags" bundle to a Python TCP server.
+-- mGBA Lua: stream Pokemon Emerald party + "state flags" bundle to Python (NDJSON),
+-- AND accept control commands from Python to inject inputs (A/B/START/DPAD/etc).
+--
+-- Telemetry:  Lua -> Python  (HOST:PORT)      e.g. 127.0.0.1:7777
+-- Control:    Python -> Lua  (HOST:PORT+1)    e.g. 127.0.0.1:7778
+--
+-- Control protocol (newline-delimited):
+--   "A 2"            -> press A for 2 frames
+--   "UP+LEFT 6"      -> hold UP+LEFT for 6 frames
+--   "NONE 0"         -> release
+--
+-- Notes:
+-- - Uses send_all() to prevent truncated JSON.
+-- - Proper JSON null handling for unknown addresses.
+-- - Auto-finds gMain in IWRAM to read callback1/callback2.
+-- - Derives robust flags (battle/menu/overworld/dialog/cutscene/transition/control).
+-- - Injects keys on the "keysRead" callback (best timing).
+--
 -- ROM: Pokemon - Emerald Version (USA, Europe)
---
--- NDJSON output: one JSON object per line (newline-delimited JSON).
---
--- Key upgrades in this rewrite:
--- 1) send_all() to prevent truncated JSON
--- 2) Proper JSON null handling for unknown addresses
--- 3) "Max flags" derived from:
---    - battleTypeFlags (battle)
---    - script contexts (dialog/cutscene)
---    - palette fade (transition)
---    - callback2 classification (overworld/menu) via self-learning histogram
--- 4) Adds extra useful derived flags:
---    - in_dialog (alias of in_script)
---    - in_cutscene (script2 OR scripted + not overworld)
---    - in_transition (palette fade)
---    - player_locked (script2 heuristic)
---    - has_player_control (inverse of player_locked + not in_transition)
---    - mode string (BATTLE/MENU/OVERWORLD/SCRIPT/TRANSITION/UNKNOWN)
 
 local HOST = "127.0.0.1"
 local PORT = 7777
+local CONTROL_PORT = PORT + 1
 
 -- =========================
 -- Party block
@@ -33,25 +33,21 @@ local PARTY_LEN = 600 -- 6 mons * 100 bytes
 -- =========================
 local OPPONENT_PARTY_BASE_PRIMARY = 0x02024744
 
--- Stream rate: every N frames (GBA ~60fps, so 6 => ~10Hz)
-local SEND_EVERY_N_FRAMES = 600
+-- Stream rate: every N frames (GBA ~60fps; 6 => ~10Hz; 600 => ~0.1Hz)
+local SEND_EVERY_N_FRAMES = 600 -- every 30 seconds
 
 -- =========================
 -- Addresses (optional)
 -- Leave as 0 to emit null in JSON (valid)
---
--- NOTE: callback1/callback2 can be auto-found via gMain scanning,
--- but if you already know these addresses, set them and it will use them.
 -- =========================
 local ADDR = {
   -- Core "what mode am I in?"
   gBattleTypeFlags         = 0x00000000, -- u32 (0 when not in battle)
 
-  -- If you know gMain base or callback fields, you can set these:
-  -- Otherwise the script will try to auto-find gMain and read callback1/callback2 from it.
+  -- gMain auto-find (if you know it, set these; otherwise auto-find)
   gMain_base               = 0x00000000, -- base of gMain struct (optional)
-  gMain_callback1_offset   = 0x00000000, -- usually 0x0 (optional if base set)
-  gMain_callback2_offset   = 0x00000004, -- usually 0x4 (optional if base set)
+  gMain_callback1_offset   = 0x00000000, -- usually 0x0
+  gMain_callback2_offset   = 0x00000004, -- usually 0x4
 
   -- Script contexts (dialog/cutscene/event running)
   gScriptContext1_isActive = 0x00000000, -- u8/bool
@@ -61,11 +57,12 @@ local ADDR = {
   gPaletteFade_active      = 0x00000000, -- u8/bool-ish
 
   -- Optional / later:
-  gPlayerAvatar_flags      = 0x00000000, -- u8/u16 (depends on what you choose)
-}
+  gPlayerAvatar_flags      = 0x00000000, -- u16 (if you wire it)
 
-local SCREENSHOT_PATH = "mgba_latest.png"     -- relative = usually ROM folder / working dir
-local SCREENSHOT_TMP  = "mgba_latest.tmp.png" -- temp file for atomic replace
+  gObjectEvents = 0x02037590,
+  gPlayerAvatar = 0x020375B4
+
+}
 
 -- =========================
 -- Helpers: socket send (prevents truncated JSON)
@@ -132,20 +129,89 @@ local function read_u32_le(addr)
   return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
 end
 
+local function read_s16_le(addr)
+  if addr == 0 or addr == nil then return nil end
+  local v = read_u16_le(addr)
+  if v == nil then return nil end
+  if v >= 0x8000 then v = v - 0x10000 end
+  return v
+end
+
+-- Emerald (symbols branch): gSaveBlock1Ptr is stored in IWRAM here
+local G_SAVE_BLOCK1_PTR = 0x03005D8C
+
+local function read_u32_le(addr)
+  local b0 = emu:read8(addr)
+  local b1 = emu:read8(addr + 1)
+  local b2 = emu:read8(addr + 2)
+  local b3 = emu:read8(addr + 3)
+  return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+end
+
+local function read_u16_le(addr)
+  local lo = emu:read8(addr)
+  local hi = emu:read8(addr + 1)
+  return lo + hi * 256
+end
+
+-- Player location in SaveBlock1 (tile coords):
+-- x: u16 @ +0x00
+-- y: u16 @ +0x02
+-- mapGroup: u8 @ +0x04
+-- mapNum: u8 @ +0x05
+local function read_player_pos_from_saveblock1()
+  local sb1 = read_u32_le(G_SAVE_BLOCK1_PTR)
+  if sb1 == nil or sb1 == 0 then return nil end
+
+  local x = read_u16_le(sb1 + 0x00)
+  local y = read_u16_le(sb1 + 0x02)
+  local mapGroup = emu:read8(sb1 + 0x04)
+  local mapNum   = emu:read8(sb1 + 0x05)
+
+  return {
+    x = x,
+    y = y,
+    mapGroup = mapGroup,
+    mapNum = mapNum,
+    saveBlock1 = sb1,
+  }
+end
+
+-- Reads player overworld position from ObjectEvent
+local function read_player_overworld_pos()
+  if ADDR.gPlayerAvatar == 0 or ADDR.gObjectEvents == 0 then
+    return nil
+  end
+
+  local objectEventId = read_u8(ADDR.gPlayerAvatar + 0x05) -- PlayerAvatar.objectEventId
+  if objectEventId == nil then
+    return nil
+  end
+
+  local oe_base = ADDR.gObjectEvents + objectEventId * 0x24 -- sizeof(ObjectEvent)=0x24
+
+  local x = read_s16_le(oe_base + 0x10) -- currentCoords.x
+  local y = read_s16_le(oe_base + 0x12) -- currentCoords.y
+  local mapNum = read_u8(oe_base + 0x09)
+  local mapGroup = read_u8(oe_base + 0x0A)
+
+  return {
+    objectEventId = objectEventId,
+    x = x,
+    y = y,
+    mapNum = mapNum,
+    mapGroup = mapGroup,
+  }
+end
+
 -- JSON-safe rendering: nil -> null
 local function json_num(v)
   if v == nil then return "null" end
   return tostring(v)
 end
 
-local function json_bool_from01(v01)
-  if v01 == nil then return "null" end
-  return (v01 ~= 0) and "true" or "false"
-end
-
 local function json_str(s)
   if s == nil then return "null" end
-  -- Minimal escaping for our mode labels / safe strings
   s = tostring(s)
   s = s:gsub("\\", "\\\\")
   s = s:gsub("\"", "\\\"")
@@ -154,7 +220,7 @@ end
 
 -- =========================
 -- Auto-find gMain (optional, but very helpful)
--- We identify gMain by matching heldKeysRaw against KEYINPUT.
+-- Identify gMain by matching heldKeysRaw against KEYINPUT.
 -- Layout used (Emerald):
 --   +0x00 callback1 (u32 ptr)
 --   +0x04 callback2 (u32 ptr)
@@ -165,37 +231,16 @@ local GMAIN_IWRAM_END   = 0x03008000
 local gMain_addr = nil
 
 local function read_keys_raw()
-  local keyinput = emu:read16(0x04000130)       -- 0=pressed, 1=released
-  return (~keyinput) & 0x03FF                   -- pressed bits
+  local keyinput = emu:read16(0x04000130) -- 0=pressed, 1=released
+  return (~keyinput) & 0x03FF             -- pressed bits
 end
 
 local function is_rom_ptr(x)
   return x ~= nil and x >= 0x08000000 and x < 0x0A000000
 end
 
-local function try_find_gMain()
-  local keys = read_keys_raw()
-  for addr = GMAIN_IWRAM_START, (GMAIN_IWRAM_END - 0x50), 4 do
-    local cb1 = read_u32_le(addr + 0x00)
-    local cb2 = read_u32_le(addr + 0x04)
-
-    if (cb1 == 0 or is_rom_ptr(cb1)) and (cb2 == 0 or is_rom_ptr(cb2)) then
-      local held = read_u16_le(addr + 0x28)
-      if held == keys then
-        gMain_addr = addr
-        console:log(string.format("Found gMain at 0x%08X", addr))
-        return true
-      end
-    end
-  end
-  return false
-end
 
 local function read_callbacks()
-  -- Priority:
-  -- 1) If user provided gMain_base, use it
-  -- 2) Else if we found gMain via scan, use it
-  -- 3) Else nil
   local base = nil
   if ADDR.gMain_base ~= nil and ADDR.gMain_base ~= 0 then
     base = ADDR.gMain_base
@@ -247,31 +292,24 @@ local function derive_flags(sig)
 
   local fading = (sig.paletteFadeActive ~= nil and sig.paletteFadeActive ~= 0) and 1 or 0
 
-  -- Learn overworld cb2 only when NOT in battle (battle callback2 would dominate histogram otherwise)
+  -- Learn overworld cb2 only when NOT in battle
   if battle == 0 then
     bump_cb2(sig.cb2)
   end
 
-  -- cb2-based classification if we have it
   local cb2_known = (sig.cb2 ~= nil and sig.cb2 ~= 0 and overworld_cb2 ~= nil)
   local cb2_is_overworld = (cb2_known and sig.cb2 == overworld_cb2) and 1 or 0
   local cb2_is_non_overworld = (cb2_known and sig.cb2 ~= overworld_cb2) and 1 or 0
 
-  -- Overworld:
-  -- Prefer cb2 classification if available; else fallback heuristic.
   local overworld = 0
   if battle == 0 then
     if cb2_known then
       overworld = cb2_is_overworld
     else
-      -- fallback: calm state (no fade, no scripts)
       overworld = (scripted == 0 and fading == 0) and 1 or 0
     end
   end
 
-  -- Menu:
-  -- If cb2 says "non-overworld" and you're not in battle, it's typically menu or other non-field handler.
-  -- Also, if fading without scripts, it's frequently menu/transition UI.
   local menu = 0
   if battle == 0 then
     if cb2_known and cb2_is_non_overworld == 1 then
@@ -281,21 +319,18 @@ local function derive_flags(sig)
     end
   end
 
-  -- Dialog / cutscene flags:
   local dialog = scripted
   local cutscene = (script2 == 1) and 1 or 0
   if cutscene == 0 and scripted == 1 and cb2_known and cb2_is_non_overworld == 1 then
     cutscene = 1
   end
 
-  -- Player control:
   local locked = (script2 == 1) and 1 or 0
   if locked == 0 and fading == 1 then
     locked = 1
   end
-  local has_control = (locked == 0 and battle == 0) and 1 or 0
+  local has_control = (locked == 0 and battle == 0 and fading == 0) and 1 or 0
 
-  -- Mode label (single best label)
   local mode = "UNKNOWN"
   if battle == 1 then
     mode = "BATTLE"
@@ -312,34 +347,126 @@ local function derive_flags(sig)
   end
 
   return {
-    -- primary
     in_battle = battle,
     in_overworld = overworld,
     in_menu = menu,
 
-    -- scripts / text / events
     in_script = scripted,
     in_dialog = dialog,
     in_cutscene = cutscene,
 
-    -- transitions / control
     in_transition = fading,
     player_locked = locked,
     has_player_control = has_control,
 
-    -- cb2 classifier
     overworld_cb2 = overworld_cb2,
     cb2_is_overworld = cb2_is_overworld,
   }, mode
 end
 
 -- =========================
--- Socket connect
+-- Control socket (Lua -> Python connect) + key injection (non-blocking)
 -- =========================
-console:log(string.format("Connecting to %s:%d ...", HOST, PORT))
+local ctrl = nil
+local ctrl_buf = ""
+
+local hold_mask = 0
+local hold_frames_left = 0
+
+local KEYMAP = {
+  A="A", B="B", START="START", SELECT="SELECT",
+  UP="UP", DOWN="DOWN", LEFT="LEFT", RIGHT="RIGHT",
+  L="L", R="R",
+}
+
+local ALIASES = {
+  U="UP", D="DOWN", LFT="LEFT", RGT="RIGHT",
+  LEFT_ARROW="LEFT", RIGHT_ARROW="RIGHT",
+}
+
+local function token_to_bit(token)
+  local t = ALIASES[token] or token
+  local name = KEYMAP[t]
+  if not name then return nil end
+  return C.GBA_KEY[name]
+end
+
+local function parse_control_line(line)
+  line = line:gsub("\r", "")
+  if line == "" then return end
+
+  local keys_part, frames_part = line:match("^([^ ]+)%s*(%d*)$")
+  local frames = tonumber(frames_part) or 2
+
+  if not keys_part or keys_part == "NONE" or keys_part == "0" then
+    hold_mask = 0
+    hold_frames_left = 0
+    return
+  end
+
+  local bits = {}
+  for tok in keys_part:gmatch("[^%+]+") do
+    local bit = token_to_bit(tok)
+    if bit ~= nil then table.insert(bits, bit) end
+  end
+
+  hold_mask = util.makeBitmask(bits)
+  hold_frames_left = frames
+end
+
+local function ensure_ctrl_connected()
+  if ctrl ~= nil then return true end
+  local s, err = socket.connect(HOST, CONTROL_PORT)
+  if s then
+    ctrl = s
+    ctrl_buf = ""
+    console:log(string.format("Connected to control server %s:%d", HOST, CONTROL_PORT))
+    return true
+  end
+  -- Don’t spam logs every frame
+  return false
+end
+
+local function pump_ctrl()
+  if not ensure_ctrl_connected() then return end
+  if not ctrl:hasdata() then return end
+
+  local chunk, err = ctrl:receive(4096)
+  if not chunk then
+    console:warn("Control recv failed: " .. tostring(err))
+    ctrl = nil
+    ctrl_buf = ""
+    hold_mask = 0
+    hold_frames_left = 0
+    return
+  end
+
+  ctrl_buf = ctrl_buf .. chunk
+  while true do
+    local nl = ctrl_buf:find("\n", 1, true)
+    if not nl then break end
+    local line = ctrl_buf:sub(1, nl - 1)
+    ctrl_buf = ctrl_buf:sub(nl + 1)
+    parse_control_line(line)
+  end
+end
+
+callbacks:add("keysRead", function()
+  pump_ctrl()
+  if hold_frames_left > 0 then
+    emu:setKeys(hold_mask)
+    hold_frames_left = hold_frames_left - 1
+  else
+    emu:setKeys(0)
+  end
+end)
+-- =========================
+-- Telemetry socket connect (Lua -> Python)
+-- =========================
+console:log(string.format("Connecting telemetry to %s:%d ...", HOST, PORT))
 local sock, err = socket.connect(HOST, PORT)
 if not sock then
-  console:error("Socket connect failed: " .. tostring(err))
+  console:error("Telemetry socket connect failed: " .. tostring(err))
   return
 end
 console:log("Connected! Streaming party + flags...")
@@ -347,14 +474,17 @@ console:log("Connected! Streaming party + flags...")
 local last_sent_frame = -999999
 
 callbacks:add("shutdown", function()
-  console:log("Shutting down script, closing socket.")
+  console:log("Shutting down script, closing sockets.")
   sock = nil
+  control_client = nil
+  control_server = nil
 end)
 
 -- =========================
--- Main loop
+-- Main loop (telemetry)
 -- =========================
 callbacks:add("frame", function()
+
   if sock == nil then return end
 
   local f = emu:currentFrame()
@@ -362,11 +492,6 @@ callbacks:add("frame", function()
     return
   end
   last_sent_frame = f
-
-  -- Ensure we have gMain (if user didn't provide it)
-  if (ADDR.gMain_base == nil or ADDR.gMain_base == 0) and gMain_addr == nil then
-    try_find_gMain()
-  end
 
   -- Party bytes
   local party_bytes = emu:readRange(PARTY_BASE_PRIMARY, PARTY_LEN)
@@ -389,19 +514,28 @@ callbacks:add("frame", function()
     playerAvatarFlags = read_u16_le(ADDR.gPlayerAvatar_flags),
   }
 
+  local ppos = read_player_pos_from_saveblock1()
+
+
   -- Derived flags + mode
   local flags, mode = derive_flags(sig)
 
-    -- Screenshot (fast + stable). Prefer screenshotToImage if available.
-  local okShot = false
-  emu:screenshot("test")
-  okShot = true
+  -- Screenshot
+  emu:screenshot()
+
 
   -- NDJSON line
   local json_line = string.format(
     '{"frame":%d,' ..
       '"party_base":%d,"party_hex":"%s",' ..
       '"opponent_party_base":%d,"opponent_party_hex":"%s",' ..
+      '"player":{' ..
+          '"objectEventId":%s,' ..
+          '"x":%s,' ..
+          '"y":%s,' ..
+          '"mapGroup":%s,' ..
+          '"mapNum":%s' ..
+        '},' ..
       '"sig":{' ..
         '"battleTypeFlags":%s,' ..
         '"gMainBase":%s,' ..
@@ -430,6 +564,11 @@ callbacks:add("frame", function()
     f,
     PARTY_BASE_PRIMARY, party_hex,
     OPPONENT_PARTY_BASE_PRIMARY, opponent_party_hex,
+    json_num(ppos and ppos.objectEventId),
+    json_num(ppos and ppos.x),
+    json_num(ppos and ppos.y),
+    json_num(ppos and ppos.mapGroup),
+    json_num(ppos and ppos.mapNum),
     json_num(sig.battleTypeFlags),
     json_num(gMainBase),
     json_num(sig.cb1),
@@ -455,6 +594,6 @@ callbacks:add("frame", function()
 
   local ok, send_err = send_all(sock, json_line)
   if not ok then
-    console:warn("Send failed: " .. tostring(send_err))
+    console:warn("Telemetry send failed: " .. tostring(send_err))
   end
 end)
